@@ -33,3 +33,7 @@ typechain-types/
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# Local tool metadata
+.sf/
+
