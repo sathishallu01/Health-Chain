@@ -264,6 +264,70 @@ async function runVerificationTests() {
     assert.match(data.message, /missing or unreadable/i);
   });
 
+  // 9. Synchronize / register off-chain record onto blockchain
+  await test("POST /api/records/:id/register registers hash on-chain and restores verified integrity", async () => {
+    // Create an unregistered record on disk and DB
+    const uniquePdf = Buffer.from(
+      `%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n% Sync test ${Date.now()}\ntrailer\n<< >>\n%%EOF\n`
+    );
+    const uploadsDir = path.join(__dirname, "..", "uploads", userA.id.toString());
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    const localFilePath = path.join(uploadsDir, `sync_test_${Date.now()}.pdf`);
+    fs.writeFileSync(localFilePath, uniquePdf);
+    const fileHash = await computeFileHash(localFilePath);
+
+    const offchainRec = await HealthRecord.create({
+      patient: userA.id,
+      name: "Pending Sync Record",
+      type: "Laboratory",
+      originalName: "sync_test.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: uniquePdf.length,
+      fileHash,
+      storagePath: localFilePath,
+      blockchainStatus: "pending",
+    });
+
+    // 1. Verify it starts unverified on-chain
+    const ver1 = await fetch(`${BASE_URL}/api/records/${offchainRec._id}/verify`, {
+      headers: { Authorization: `Bearer ${tokenA}` },
+    });
+    const verData1 = await ver1.json();
+    assert.strictEqual(verData1.hashRegisteredOnBlockchain, false);
+
+    // 2. Call register endpoint
+    const regRes = await fetch(`${BASE_URL}/api/records/${offchainRec._id}/register`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokenA}` },
+    });
+    assert.strictEqual(regRes.status, 200);
+    const regData = await regRes.json();
+    assert.strictEqual(regData.success, true);
+    assert.strictEqual(regData.blockchainStatus, "verified");
+    assert.ok(regData.txHash);
+
+    // 3. Verify it is now verified on-chain
+    const ver2 = await fetch(`${BASE_URL}/api/records/${offchainRec._id}/verify`, {
+      headers: { Authorization: `Bearer ${tokenA}` },
+    });
+    const verData2 = await ver2.json();
+    assert.strictEqual(verData2.integrityVerified, true);
+    assert.strictEqual(verData2.hashRegisteredOnBlockchain, true);
+    assert.strictEqual(verData2.fileMatchesDatabase, true);
+  });
+
+  // 10. Registration security: reject cross-patient and tampered file attempts
+  await test("POST /api/records/:id/register rejects unauthorized cross-patient attempts", async () => {
+    const recordA = await uploadTestFile(tokenA, "patient_a_sec.pdf", validPdfHeader);
+
+    // Patient B attempts to register Patient A's record
+    const crossRes = await fetch(`${BASE_URL}/api/records/${recordA._id}/register`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokenB}` },
+    });
+    assert.strictEqual(crossRes.status, 404);
+  });
+
   console.log("==================================================");
   console.log(`TOTAL TESTS: ${passed + failed}`);
   console.log(`  PASSED: ${passed}`);

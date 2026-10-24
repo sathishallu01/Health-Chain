@@ -9,7 +9,7 @@ const SEED_PROVIDERS = [
     role: "doctor",
     specialty: "General Physician",
     organization: "City Care Hospital",
-    ethereumAddress: "0x60D03849cB06Df4046E8B84BD4738F0bfc2a7883",
+    ethereumAddress: "0xf897c63d17802c0f54875f4f3913dd353c2473e2",
     isWalletVerified: true,
   },
   {
@@ -18,7 +18,7 @@ const SEED_PROVIDERS = [
     role: "doctor",
     specialty: "Laboratory Specialist",
     organization: "Central Diagnostic Lab",
-    ethereumAddress: "0x0140E191b60Cf4Ae2419659824c0f952987C4164",
+    ethereumAddress: "0xdcfcce8ed470404320e60022cfa6c63f043bd007",
     isWalletVerified: true,
   },
   {
@@ -27,7 +27,7 @@ const SEED_PROVIDERS = [
     role: "doctor",
     specialty: "Cardiologist",
     organization: "Green Valley Clinic",
-    ethereumAddress: "0xcd5BF8fE742B277B51ed9661aA006480F9336eBc",
+    ethereumAddress: "0x734c42d658850b32669c0ecd81c750e03547f35f",
     isWalletVerified: true,
   },
 ];

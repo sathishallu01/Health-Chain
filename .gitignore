@@ -1,4 +1,4 @@
-﻿node_modules/
+node_modules/
 .env
 .env.*
 !.env.example
@@ -36,4 +36,8 @@ Thumbs.db
 
 # Local tool metadata
 .sf/
+.pids/
 
+
+# Persistent local blockchain data
+blockchain/ganache-data/

@@ -502,6 +502,138 @@ async function verifyRecordIntegrity(req, res) {
   }
 }
 
+// ── POST /api/records/:id/register ───────────────────────────────────────────
+
+/**
+ * Re-register or synchronize an existing patient health record hash to the blockchain.
+ *
+ * POST /api/records/:id/register
+ */
+async function registerRecordOnBlockchain(req, res) {
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(404).json({ success: false, message: "Record not found." });
+  }
+
+  try {
+    const record = await HealthRecord.findOne({
+      _id: id,
+      patient: req.user.userId,
+      isDeleted: false,
+    }).select("+storagePath");
+
+    if (!record) {
+      return res.status(404).json({ success: false, message: "Record not found." });
+    }
+
+    // 1. Verify file exists on disk
+    if (!record.storagePath || !fs.existsSync(record.storagePath)) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot register on blockchain: stored file is missing or unreadable on server.",
+      });
+    }
+
+    // 2. Recompute SHA-256 hash from disk
+    let calculatedHash;
+    try {
+      calculatedHash = await computeFileHash(record.storagePath);
+    } catch (hashErr) {
+      return res.status(500).json({
+        success: false,
+        message: `Failed to compute file hash: ${hashErr.message}`,
+      });
+    }
+
+    // 3. Compare calculated hash against stored database hash
+    if (!calculatedHash || calculatedHash.toLowerCase() !== record.fileHash.toLowerCase()) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot register on blockchain: file content does not match stored database hash.",
+      });
+    }
+
+    // 4. Ensure blockchain service is available
+    if (!blockchainService.isAvailable()) {
+      await blockchainService.init();
+      if (!blockchainService.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          message: `Blockchain service unavailable: ${blockchainService.unavailableReason()}`,
+        });
+      }
+    }
+
+    const patientId = req.user.userId.toString();
+    const targetHash = record.fileHash.toLowerCase();
+
+    // 5. Check if already registered on-chain
+    let onChainHashes = [];
+    try {
+      onChainHashes = await blockchainService.getRecordHashes(patientId);
+    } catch (checkErr) {
+      console.warn("[recordController] getRecordHashes check failed:", checkErr.message);
+    }
+
+    const alreadyRegistered = Array.isArray(onChainHashes) && onChainHashes.some(
+      (h) => typeof h === "string" && h.toLowerCase() === targetHash
+    );
+
+    let txHash = record.txHash;
+    let blockNumber = record.blockNumber;
+
+    if (!alreadyRegistered) {
+      try {
+        const txResult = await blockchainService.addRecord(patientId, targetHash);
+        txHash = txResult.txHash;
+        blockNumber = txResult.blockNumber;
+      } catch (bcErr) {
+        console.error("[recordController] addRecord failed:", bcErr.message);
+        return res.status(500).json({
+          success: false,
+          message: `Blockchain transaction failed: ${bcErr.message}`,
+        });
+      }
+
+      // 6. Verify result by reading back from blockchain
+      const updatedHashes = await blockchainService.getRecordHashes(patientId);
+      const isConfirmed = Array.isArray(updatedHashes) && updatedHashes.some(
+        (h) => typeof h === "string" && h.toLowerCase() === targetHash
+      );
+
+      if (!isConfirmed) {
+        return res.status(500).json({
+          success: false,
+          message: "Transaction submitted but hash could not be confirmed on blockchain.",
+        });
+      }
+    }
+
+    // 7. Update record metadata in database
+    record.txHash = txHash;
+    record.blockNumber = blockNumber;
+    record.blockchainStatus = "verified";
+    await record.save();
+
+    return res.status(200).json({
+      success: true,
+      message: alreadyRegistered
+        ? "Record hash was already registered on the blockchain. Status updated to verified."
+        : "Record successfully registered on the blockchain.",
+      txHash,
+      blockNumber,
+      blockchainStatus: "verified",
+    });
+  } catch (err) {
+    console.error("[recordController] registerRecordOnBlockchain error:", err.message);
+    return res.status(500).json({
+      success: false,
+      message: `Failed to register record on blockchain: ${err.message}`,
+    });
+  }
+}
+
 // ── GET /api/records/patient/:patientId ───────────────────────────────────────
 
 /**
@@ -573,6 +705,112 @@ async function getPatientRecordsForProvider(req, res) {
     });
   } catch (err) {
     console.error("[recordController] getPatientRecordsForProvider error:", err.message);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve patient records.",
+    });
+  }
+}
+
+// ── GET /api/records/patient-by-email ─────────────────────────────────────────
+
+/**
+ * Retrieve a patient's health records for an authorized healthcare provider by patient email.
+ * Strictly verifies live on-chain permission via HealthRecordContract.hasAccess().
+ */
+async function getPatientRecordsByEmailForProvider(req, res) {
+  if (!["doctor", "hospital"].includes(req.user.role)) {
+    return res.status(403).json({
+      success: false,
+      message: "Access forbidden. Only authorized healthcare providers can access patient records via this endpoint.",
+    });
+  }
+
+  const email = req.query.email || req.body?.email;
+
+  if (!email || typeof email !== "string" || !/^\S+@\S+\.\S+$/.test(email.trim())) {
+    return res.status(400).json({
+      success: false,
+      message: "A valid patient email address is required.",
+    });
+  }
+
+  try {
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // 1. Find patient by email
+    const patient = await User.findOne({
+      email: normalizedEmail,
+      role: "patient",
+      isActive: true,
+    })
+      .select("_id name email")
+      .lean();
+
+    if (!patient) {
+      return res.status(404).json({
+        success: false,
+        message: `Patient not found with email: ${normalizedEmail}`,
+      });
+    }
+
+    const patientId = patient._id.toString();
+
+    // 2. Verify provider's linked and verified Ethereum wallet
+    const provider = await User.findById(req.user.userId)
+      .select("ethereumAddress isWalletVerified")
+      .lean();
+
+    if (!provider || !provider.ethereumAddress || !provider.isWalletVerified) {
+      return res.status(403).json({
+        success: false,
+        message: "Access forbidden. Provider does not have a verified Ethereum wallet.",
+      });
+    }
+
+    // 3. Strictly verify live on-chain permission via HealthRecordContract.hasAccess()
+    let hasAccess = false;
+    try {
+      hasAccess = await blockchainService.hasAccess(
+        patientId,
+        provider.ethereumAddress
+      );
+    } catch (bcErr) {
+      console.error("[recordController] on-chain access check failed by email lookup:", bcErr.message);
+      return res.status(500).json({
+        success: false,
+        message: `Failed to verify on-chain permissions: ${bcErr.message}`,
+      });
+    }
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: `Access forbidden. You do not have active on-chain permission to view records for patient ${patient.name || normalizedEmail}.`,
+      });
+    }
+
+    // 4. Retrieve health records
+    const records = await HealthRecord.find({
+      patient: patientId,
+      isDeleted: false,
+    })
+      .select("-storagePath")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      patient: {
+        id: patient._id.toString(),
+        name: patient.name,
+        email: patient.email,
+      },
+      records,
+      count: records.length,
+    });
+  } catch (err) {
+    console.error("[recordController] getPatientRecordsByEmailForProvider error:", err.message);
     return res.status(500).json({
       success: false,
       message: "Failed to retrieve patient records.",
@@ -677,6 +915,8 @@ module.exports = {
   uploadRecord,
   getRecords,
   getPatientRecordsForProvider,
+  getPatientRecordsByEmailForProvider,
   verifyRecordIntegrity,
+  registerRecordOnBlockchain,
   getRecordFile,
 };

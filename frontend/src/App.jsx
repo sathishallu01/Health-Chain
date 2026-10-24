@@ -4,36 +4,15 @@ import {
   getPatientRecords,
   loginPatient,
   registerPatient,
+  registerDoctor,
   uploadPatientRecord,
   verifyRecordIntegrity,
+  registerRecordToBlockchain,
   getProvidersList,
   grantProviderAccess,
   revokeProviderAccess,
 } from "./api/api";
-
-const initialProviders = [
-  {
-    id: 1,
-    name: "Dr. Ananya Rao",
-    organization: "City Care Hospital",
-    specialty: "General Physician",
-    access: true,
-  },
-  {
-    id: 2,
-    name: "Dr. Rahul Sharma",
-    organization: "Central Diagnostic Lab",
-    specialty: "Laboratory Specialist",
-    access: true,
-  },
-  {
-    id: 3,
-    name: "Dr. Priya Kumar",
-    organization: "Green Valley Clinic",
-    specialty: "Cardiologist",
-    access: false,
-  },
-];
+import DoctorDashboard from "./components/DoctorDashboard";
 
 const initialTransactions = [
   {
@@ -66,6 +45,7 @@ const navigation = [
   { label: "Dashboard", icon: "▦" },
   { label: "My Health Records", icon: "▤" },
   { label: "Access Permissions", icon: "♧" },
+  { label: "Find a Doctor", icon: "🩺" },
   { label: "Blockchain Audit", icon: "⬡" },
 ];
 
@@ -79,6 +59,8 @@ function RecordsTable({
   verificationResults = {},
   verificationErrors = {},
   onVerify,
+  registeringMap = {},
+  onRegisterBlockchain,
 }) {
   if (loading) {
     return (
@@ -295,6 +277,30 @@ function RecordsTable({
                                 {result.message}
                               </p>
                             )}
+
+                            {/* Re-register on Blockchain button if file matches DB but hash missing on-chain */}
+                            {result.fileMatchesDatabase && !result.hashRegisteredOnBlockchain && (
+                              <div className="mt-2 pt-2 border-t border-rose-200">
+                                <button
+                                  type="button"
+                                  onClick={() => onRegisterBlockchain && onRegisterBlockchain(recId)}
+                                  disabled={Boolean(registeringMap[recId])}
+                                  className="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-blue-600 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50 transition"
+                                >
+                                  {registeringMap[recId] ? (
+                                    <>
+                                      <span className="h-3 w-3 animate-spin rounded-full border border-white border-t-transparent" />
+                                      <span>Registering on Chain...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span>⬡</span>
+                                      <span>Register on Blockchain</span>
+                                    </>
+                                  )}
+                                </button>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -327,6 +333,7 @@ function App() {
   const [providersError, setProvidersError] = useState("");
   const [providerActionMap, setProviderActionMap] = useState({});
   const [accessMessage, setAccessMessage] = useState("");
+  const [doctorSearch, setDoctorSearch] = useState("");
   const [auditSearch, setAuditSearch] = useState("");
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All");
@@ -347,7 +354,10 @@ function App() {
   const [authForm, setAuthForm] = useState({
     name: "",
     email: "",
+    specialty: "",
+    organization: "",
     password: "",
+    confirmPassword: "",
   });
   const [authError, setAuthError] = useState("");
   const [authMessage, setAuthMessage] = useState("");
@@ -366,6 +376,7 @@ function App() {
 
   // Record integrity verification state
   const [verifyingMap, setVerifyingMap] = useState({});
+  const [registeringMap, setRegisteringMap] = useState({});
   const [verificationResults, setVerificationResults] = useState({});
   const [verificationErrors, setVerificationErrors] = useState({});
 
@@ -426,6 +437,31 @@ function App() {
     }
   }, [currentUser]);
 
+  const handleRegisterRecord = useCallback(
+    async (recordId) => {
+      if (!recordId || registeringMap[recordId]) return;
+
+      setRegisteringMap((prev) => ({ ...prev, [recordId]: true }));
+      setVerificationErrors((prev) => ({ ...prev, [recordId]: "" }));
+
+      try {
+        await registerRecordToBlockchain(recordId);
+        await loadRecords();
+        // Automatically re-run integrity check to confirm verified state on-chain
+        const refreshedResult = await verifyRecordIntegrity(recordId);
+        setVerificationResults((prev) => ({ ...prev, [recordId]: refreshedResult }));
+      } catch (err) {
+        setVerificationErrors((prev) => ({
+          ...prev,
+          [recordId]: `Failed to register on blockchain: ${err.message}`,
+        }));
+      } finally {
+        setRegisteringMap((prev) => ({ ...prev, [recordId]: false }));
+      }
+    },
+    [registeringMap, loadRecords]
+  );
+
   const loadProviders = useCallback(async () => {
     if (!currentUser) return;
     setProvidersLoading(true);
@@ -442,7 +478,7 @@ function App() {
 
   useEffect(() => {
     let ignore = false;
-    if (currentUser) {
+    if (currentUser && currentUser.role === "patient") {
       getPatientRecords()
         .then((data) => {
           if (!ignore) {
@@ -488,6 +524,18 @@ function App() {
       return matchesSearch && matchesCategory;
     });
   }, [records, search, category]);
+
+  const filteredDoctors = useMemo(() => {
+    const query = doctorSearch.trim().toLowerCase();
+    if (!query) return providers;
+    return providers.filter(
+      (p) =>
+        (p.name || "").toLowerCase().includes(query) ||
+        (p.specialty || "").toLowerCase().includes(query) ||
+        (p.organization || "").toLowerCase().includes(query)
+    );
+  }, [providers, doctorSearch]);
+
 
   async function handleUploadSubmit(event) {
     event.preventDefault();
@@ -617,13 +665,50 @@ function App() {
 
     try {
       if (authPage === "register") {
-        const data = await registerPatient(authForm);
-        setAuthMessage(data.message || "Registration successful.");
+        const data = await registerPatient({
+          name: authForm.name,
+          email: authForm.email,
+          password: authForm.password,
+        });
+        setAuthMessage(data.message || "Registration successful. Please log in.");
         setAuthPage("login");
-        setAuthForm((current) => ({
-          ...current,
+        setAuthForm({
+          name: "",
+          email: "",
+          specialty: "",
+          organization: "",
           password: "",
-        }));
+          confirmPassword: "",
+        });
+      } else if (authPage === "register-doctor") {
+        if (!authForm.name.trim() || !authForm.email.trim() || !authForm.specialty.trim() || !authForm.organization.trim() || !authForm.password) {
+          setAuthError("All doctor fields are required.");
+          setAuthLoading(false);
+          return;
+        }
+        if (authForm.password !== authForm.confirmPassword) {
+          setAuthError("Password and Confirm Password do not match.");
+          setAuthLoading(false);
+          return;
+        }
+        const data = await registerDoctor({
+          name: authForm.name.trim(),
+          email: authForm.email.trim(),
+          specialty: authForm.specialty.trim(),
+          organization: authForm.organization.trim(),
+          password: authForm.password,
+          confirmPassword: authForm.confirmPassword,
+        });
+        setAuthMessage(data.message || "Doctor registered successfully! You can now log in.");
+        setAuthPage("login");
+        setAuthForm({
+          name: "",
+          email: "",
+          specialty: "",
+          organization: "",
+          password: "",
+          confirmPassword: "",
+        });
       } else {
         const data = await loginPatient({
           email: authForm.email,
@@ -634,7 +719,14 @@ function App() {
         sessionStorage.setItem("healthchain_token", data.token);
         sessionStorage.setItem("healthchain_user", JSON.stringify(data.user));
 
-        setAuthForm({ name: "", email: "", password: "" });
+        setAuthForm({
+          name: "",
+          email: "",
+          specialty: "",
+          organization: "",
+          password: "",
+          confirmPassword: "",
+        });
         setAuthMessage("");
       }
     } catch (error) {
@@ -643,6 +735,20 @@ function App() {
       setAuthLoading(false);
     }
   }
+
+  const handleLogout = useCallback(() => {
+    sessionStorage.removeItem("healthchain_token");
+    sessionStorage.removeItem("healthchain_user");
+    setCurrentUser(null);
+    setRecords([]);
+    setAuthPage("login");
+    setAuthForm({ name: "", email: "", password: "" });
+    setAuthError("");
+    setAuthMessage("");
+    setVerifyingMap({});
+    setVerificationResults({});
+    setVerificationErrors({});
+  }, []);
 
   if (!currentUser) {
     return (
@@ -660,7 +766,7 @@ function App() {
             </p>
           </div>
 
-          <div className="mb-6 grid grid-cols-2 rounded-xl bg-slate-100 p-1">
+          <div className="mb-6 grid grid-cols-3 rounded-xl bg-slate-100 p-1 text-xs sm:text-sm">
             <button
               type="button"
               onClick={() => {
@@ -668,10 +774,10 @@ function App() {
                 setAuthError("");
                 setAuthMessage("");
               }}
-              className={`rounded-lg py-2 text-sm font-semibold ${
+              className={`rounded-lg py-2 font-semibold transition ${
                 authPage === "login"
                   ? "bg-white text-blue-700 shadow-sm"
-                  : "text-slate-500"
+                  : "text-slate-500 hover:text-slate-700"
               }`}
             >
               Login
@@ -683,13 +789,28 @@ function App() {
                 setAuthError("");
                 setAuthMessage("");
               }}
-              className={`rounded-lg py-2 text-sm font-semibold ${
+              className={`rounded-lg py-2 font-semibold transition ${
                 authPage === "register"
                   ? "bg-white text-blue-700 shadow-sm"
-                  : "text-slate-500"
+                  : "text-slate-500 hover:text-slate-700"
               }`}
             >
-              Register
+              Patient
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthPage("register-doctor");
+                setAuthError("");
+                setAuthMessage("");
+              }}
+              className={`rounded-lg py-2 font-semibold transition ${
+                authPage === "register-doctor"
+                  ? "bg-white text-teal-700 shadow-sm"
+                  : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              Doctor
             </button>
           </div>
 
@@ -709,7 +830,7 @@ function App() {
             {authPage === "register" && (
               <div>
                 <label className="mb-1 block text-sm font-medium text-slate-700">
-                  Full name
+                  Full name *
                 </label>
                 <input
                   required
@@ -725,9 +846,66 @@ function App() {
               </div>
             )}
 
+            {authPage === "register-doctor" && (
+              <>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700">
+                    Doctor Full Name *
+                  </label>
+                  <input
+                    required
+                    minLength={2}
+                    maxLength={100}
+                    value={authForm.name}
+                    onChange={(event) =>
+                      setAuthForm({ ...authForm, name: event.target.value })
+                    }
+                    className="w-full rounded-lg border border-slate-200 px-3 py-3 outline-none focus:border-teal-600"
+                    placeholder="e.g. Dr. Rajesh Verma"
+                  />
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700">
+                      Specialization *
+                    </label>
+                    <input
+                      required
+                      minLength={2}
+                      maxLength={100}
+                      value={authForm.specialty}
+                      onChange={(event) =>
+                        setAuthForm({ ...authForm, specialty: event.target.value })
+                      }
+                      className="w-full rounded-lg border border-slate-200 px-3 py-3 outline-none focus:border-teal-600"
+                      placeholder="e.g. Cardiologist"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700">
+                      Hospital or Clinic *
+                    </label>
+                    <input
+                      required
+                      minLength={2}
+                      maxLength={100}
+                      value={authForm.organization}
+                      onChange={(event) =>
+                        setAuthForm({ ...authForm, organization: event.target.value })
+                      }
+                      className="w-full rounded-lg border border-slate-200 px-3 py-3 outline-none focus:border-teal-600"
+                      placeholder="e.g. City Care Hospital"
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
             <div>
               <label className="mb-1 block text-sm font-medium text-slate-700">
-                Email address
+                Email address *
               </label>
               <input
                 required
@@ -744,13 +922,13 @@ function App() {
 
             <div>
               <label className="mb-1 block text-sm font-medium text-slate-700">
-                Password
+                Password *
               </label>
               <input
                 required
                 type="password"
                 minLength={8}
-                autoComplete={authPage === "register" ? "new-password" : "current-password"}
+                autoComplete={authPage.startsWith("register") ? "new-password" : "current-password"}
                 value={authForm.password}
                 onChange={(event) =>
                   setAuthForm({ ...authForm, password: event.target.value })
@@ -760,18 +938,61 @@ function App() {
               />
             </div>
 
+            {authPage === "register-doctor" && (
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">
+                  Confirm Password *
+                </label>
+                <input
+                  required
+                  type="password"
+                  minLength={8}
+                  autoComplete="new-password"
+                  value={authForm.confirmPassword}
+                  onChange={(event) =>
+                    setAuthForm({ ...authForm, confirmPassword: event.target.value })
+                  }
+                  className="w-full rounded-lg border border-slate-200 px-3 py-3 outline-none focus:border-teal-600"
+                  placeholder="Re-enter password"
+                />
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={authLoading}
-              className="w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className={`w-full rounded-lg px-4 py-3 font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                authPage === "register-doctor"
+                  ? "bg-teal-700 hover:bg-teal-800"
+                  : "bg-blue-600 hover:bg-blue-700"
+              }`}
             >
               {authLoading
                 ? "Please wait..."
+                : authPage === "register-doctor"
+                ? "Create Doctor Account"
                 : authPage === "register"
                 ? "Create Patient Account"
                 : "Login"}
             </button>
           </form>
+
+          {authPage === "login" && (
+            <p className="mt-4 text-center text-xs text-slate-500">
+              Healthcare provider?{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthPage("register-doctor");
+                  setAuthError("");
+                  setAuthMessage("");
+                }}
+                className="font-semibold text-teal-700 hover:underline"
+              >
+                Register as Doctor
+              </button>
+            </p>
+          )}
 
           <p className="mt-5 text-center text-xs leading-5 text-slate-400">
             Student demonstration only. Use synthetic information, not real
@@ -782,6 +1003,19 @@ function App() {
     );
   }
 
+  // Role-based dashboard dispatch
+  if (currentUser.role === "doctor" || currentUser.role === "hospital") {
+    return (
+      <DoctorDashboard
+        currentUser={currentUser}
+        onLogout={handleLogout}
+        backendStatus={backendStatus}
+        backendError={backendError}
+      />
+    );
+  }
+
+  // Patient Dashboard
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 md:flex">
       <aside className="flex w-full flex-col border-r border-slate-200 bg-white md:fixed md:inset-y-0 md:w-64">
@@ -869,19 +1103,7 @@ function App() {
             </div>
 
             <button
-              onClick={() => {
-                sessionStorage.removeItem("healthchain_token");
-                sessionStorage.removeItem("healthchain_user");
-                setCurrentUser(null);
-                setRecords([]);
-                setAuthPage("login");
-                setAuthForm({ name: "", email: "", password: "" });
-                setAuthError("");
-                setAuthMessage("");
-                setVerifyingMap({});
-                setVerificationResults({});
-                setVerificationErrors({});
-              }}
+              onClick={handleLogout}
               className="rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50"
             >
               Logout
@@ -959,6 +1181,8 @@ function App() {
                 verificationResults={verificationResults}
                 verificationErrors={verificationErrors}
                 onVerify={handleVerifyRecord}
+                registeringMap={registeringMap}
+                onRegisterBlockchain={handleRegisterRecord}
               />
               <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-400">
                 Health records stored securely via backend with SHA-256 integrity verification.
@@ -1135,6 +1359,8 @@ function App() {
                 verificationResults={verificationResults}
                 verificationErrors={verificationErrors}
                 onVerify={handleVerifyRecord}
+                registeringMap={registeringMap}
+                onRegisterBlockchain={handleRegisterRecord}
               />
               <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-400">
                 All uploaded files are validated with streaming SHA-256 hashes and stored outside public access.
@@ -1413,9 +1639,162 @@ function App() {
           </section>
         )}
 
+        {activePage === "Find a Doctor" && (
+          <section>
+            <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">
+                    Find a Doctor & Directory
+                  </h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Browse registered medical specialists and authorize on-chain access to your health documents.
+                  </p>
+                </div>
+                <button
+                  onClick={loadProviders}
+                  disabled={providersLoading}
+                  className="inline-flex items-center gap-2 self-start rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50 transition"
+                >
+                  {providersLoading ? "Refreshing..." : "↻ Refresh Directory"}
+                </button>
+              </div>
+
+              <div className="mt-5">
+                <input
+                  type="text"
+                  placeholder="Search by doctor name, specialization (e.g. Cardiologist), or clinic/hospital..."
+                  value={doctorSearch}
+                  onChange={(e) => setDoctorSearch(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-teal-600 focus:ring-1 focus:ring-teal-600 transition"
+                />
+              </div>
+
+              {accessMessage && (
+                <div
+                  className={`mt-4 rounded-xl border p-3 text-sm ${
+                    accessMessage.toLowerCase().includes("failed") || accessMessage.toLowerCase().includes("error")
+                      ? "border-red-200 bg-red-50 text-red-700"
+                      : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  }`}
+                >
+                  {accessMessage}
+                </div>
+              )}
+            </div>
+
+            {providersLoading && providers.length === 0 ? (
+              <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-500">
+                Loading doctor directory...
+              </div>
+            ) : filteredDoctors.length === 0 ? (
+              <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-500">
+                {doctorSearch ? `No doctors found matching "${doctorSearch}".` : "No registered doctors found in the directory."}
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {filteredDoctors.map((doc) => {
+                  const isProcessing = Boolean(providerActionMap[doc.id]);
+                  return (
+                    <div
+                      key={doc.id}
+                      className="flex flex-col justify-between rounded-2xl border border-slate-200 bg-white p-5 shadow-sm hover:border-slate-300 transition"
+                    >
+                      <div>
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-teal-50 text-lg font-bold text-teal-800">
+                            {doc.name
+                              .split(" ")
+                              .slice(1)
+                              .map((p) => p[0])
+                              .join("")
+                              .slice(0, 2) || doc.name.slice(0, 2)}
+                          </div>
+                          <div className="min-w-0">
+                            <h4 className="font-bold text-slate-900 truncate">{doc.name}</h4>
+                            <span className="inline-block mt-0.5 rounded-md bg-teal-50 border border-teal-200 px-2 py-0.5 text-xs font-semibold text-teal-800">
+                              {doc.specialty || "Medical Doctor"}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 space-y-1.5 text-xs text-slate-600">
+                          <p>
+                            <span className="font-medium text-slate-800">Hospital/Clinic:</span>{" "}
+                            {doc.organization || "Medical Practice"}
+                          </p>
+                          <p>
+                            <span className="font-medium text-slate-800">Email:</span> {doc.email}
+                          </p>
+                          <p>
+                            <span className="font-medium text-slate-800">Wallet:</span>{" "}
+                            {doc.isWalletVerified && doc.ethereumAddress ? (
+                              <span className="font-mono text-emerald-700 font-medium">
+                                {doc.ethereumAddress.slice(0, 6)}...{doc.ethereumAddress.slice(-4)} (Verified)
+                              </span>
+                            ) : (
+                              <span className="text-amber-600 font-medium">Wallet Pending</span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="mt-5 border-t border-slate-100 pt-4">
+                        <div className="mb-3 flex items-center justify-between">
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                              doc.access
+                                ? "bg-emerald-50 text-emerald-700"
+                                : "bg-slate-100 text-slate-600"
+                            }`}
+                          >
+                            {doc.access ? "Access Granted" : "No Access"}
+                          </span>
+                        </div>
+
+                        {doc.isWalletVerified ? (
+                          <button
+                            onClick={() => toggleProviderAccess(doc.id)}
+                            disabled={isProcessing}
+                            className={`w-full inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                              doc.access
+                                ? "border border-red-200 text-red-600 hover:bg-red-50"
+                                : "bg-blue-600 text-white hover:bg-blue-700"
+                            }`}
+                          >
+                            {isProcessing && (
+                              <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                            )}
+                            {isProcessing
+                              ? doc.access
+                                ? "Revoking..."
+                                : "Granting on Blockchain..."
+                              : doc.access
+                              ? "Revoke Access"
+                              : "Grant Access on Blockchain"}
+                          </button>
+                        ) : (
+                          <button
+                            disabled
+                            title="Doctor has not verified an Ethereum address. On-chain access requires a verified wallet."
+                            className="w-full rounded-lg bg-slate-100 px-4 py-2 text-xs font-medium text-slate-400 cursor-not-allowed"
+                          >
+                            Wallet Verification Pending
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
         {activePage !== "Dashboard" &&
           activePage !== "My Health Records" &&
           activePage !== "Access Permissions" &&
+          activePage !== "Find a Doctor" &&
           activePage !== "Blockchain Audit" && (
             <section className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
               <h3 className="text-xl font-bold text-slate-900">{activePage}</h3>

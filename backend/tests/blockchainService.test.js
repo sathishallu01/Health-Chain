@@ -11,7 +11,7 @@ const deployment        = JSON.parse(fs.readFileSync(deploymentPath, "utf8"));
 const CONTRACT_OWNER    = deployment.deployerAddress;
 
 // An account that is valid on Ganache but is NOT the contract owner (Account #1)
-const NON_OWNER_GANACHE_ACCOUNT = "0x60d03849cb06df4046e8b84bd4738f0bfc2a7883";
+const NON_OWNER_GANACHE_ACCOUNT = "0xf897c63d17802c0f54875f4f3913dd353c2473e2";
 
 async function runBlockchainServiceTests() {
   console.log("==================================================");

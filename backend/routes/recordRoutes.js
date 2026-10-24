@@ -23,7 +23,9 @@ const {
   uploadRecord,
   getRecords,
   getPatientRecordsForProvider,
+  getPatientRecordsByEmailForProvider,
   verifyRecordIntegrity,
+  registerRecordOnBlockchain,
   getRecordFile,
 } = require("../controllers/recordController");
 
@@ -57,6 +59,13 @@ router.get(
   getRecords
 );
 
+// GET /api/records/patient-by-email — authorized provider lookup of patient records by email
+router.get(
+  "/patient-by-email",
+  authMiddleware,
+  getPatientRecordsByEmailForProvider
+);
+
 // GET /api/records/patient/:patientId — authorized provider view of patient records
 router.get(
   "/patient/:patientId",
@@ -70,6 +79,14 @@ router.get(
   authMiddleware,
   requirePatientRole,
   verifyRecordIntegrity
+);
+
+// POST /api/records/:id/register — patient register/sync record on blockchain
+router.post(
+  "/:id/register",
+  authMiddleware,
+  requirePatientRole,
+  registerRecordOnBlockchain
 );
 
 // GET /api/records/:id/file — patient or authorized provider download/preview

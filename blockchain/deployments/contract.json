@@ -1,5 +1,5 @@
 {
-  "address": "0xbE2Fb1B9b42387d2576025cdA7D16D246D3Fb0E7",
+  "address": "0xb353856da6Af64a00aE7AA6Ff93CfEbD7e23345b",
   "abi": [
     {
       "inputs": [],
@@ -232,6 +232,6 @@
   ],
   "network": "ganache",
   "chainId": 1337,
-  "deployedAt": "2026-10-23T14:31:48.923Z",
-  "deployerAddress": "0xBC344E4daD7590Bc3e269E4E44367a9e542ba35e"
+  "deployedAt": "2026-10-23T19:15:42.696Z",
+  "deployerAddress": "0x45F96A8ae86d3F4F7d1114Bac1A1fE7a889f05F4"
 }
